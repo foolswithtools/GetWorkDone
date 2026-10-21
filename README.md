@@ -43,8 +43,8 @@ snapshot pull requests from the private repository: a tagged, allowlisted,
 scanned and squashed copy of the published paths, which a maintainer reviews
 and merges. There is no live mirror.
 
-`main` is protected; a reviewed pull request with a green `ci` check is the
-only way in. The owner applies the protection with:
+Once protected, `main` takes changes only through a reviewed pull request with
+a green `ci` check. The owner applies the protection with:
 
 ```
 bash scripts/branch-protection.sh foolswithtools/GetWorkDone
