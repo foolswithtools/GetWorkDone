@@ -30,9 +30,12 @@ the API, [Dex](https://dexidp.io) as a local sign-in provider
 trying the app out, not for real use:
 
 - every password in it is public;
-- the session cookies are `Secure` over plain http, which Chromium and Firefox
-  accept on `localhost` only;
 - telemetry stays in the process.
+
+Use Chrome or Firefox. The session cookies are `Secure` over plain http, which
+both accept on `localhost` and Safari does not: in Safari, sign-in ends at
+`/auth/callback` with "No sign-in in progress". If you recreate only the `api`
+service, run `docker compose up -d` afterwards so Dex rejoins it.
 
 To sign in with your own OIDC provider instead of Dex, register
 `http://localhost:8080/auth/callback` with it, then:
@@ -64,16 +67,25 @@ pnpm db:migrate          # the API never migrates by itself
 
 export OTEL_SDK_DISABLED=true   # no OpenTelemetry collector on localhost:4318
 export OIDC_ISSUER_URL=... OIDC_CLIENT_ID=... OIDC_CLIENT_SECRET=... \
-  OIDC_REDIRECT_URI=http://localhost:8080/auth/callback
+  OIDC_REDIRECT_URI=http://localhost:5173/auth/callback
 pnpm dev                 # API on :8080, the web app's dev server on :5173
 ```
 
-The issuer must use https, unless it is plain http on `localhost` or
-`127.0.0.1`.
+Open http://localhost:5173. The dev server passes `/auth` and `/api` through
+to the API, so register `http://localhost:5173/auth/callback` with your
+provider. The issuer must use https, unless it is plain http on `localhost` or
+`127.0.0.1`. For a local issuer, run Dex with the compose file's config. Its
+client is `getworkdone-local`, the secret is the same, and the issuer is
+`http://localhost:5556/dex`:
+
+```
+docker run -d -p 5556:5556 -v "$PWD/deploy/local/dex.yaml:/etc/dex/config.yaml:ro" \
+  ghcr.io/dexidp/dex:v2.46.1 dex serve /etc/dex/config.yaml
+```
 
 `pnpm lint` and `pnpm test:unit` need nothing else. `pnpm test:integration`
-and `pnpm e2e` need the Postgres above (`pnpm exec playwright install
-chromium` once for e2e).
+needs the Postgres above. `pnpm e2e` needs it too, and runs against the built
+app: `pnpm build` first, and `pnpm exec playwright install chromium` once.
 
 ## Configuration
 
