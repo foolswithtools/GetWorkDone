@@ -1,0 +1,35 @@
+# Dex as GetWorkDone's local OIDC issuer, for compose.yaml only: a demo sign-in, never a deployment's.
+# Its values are known to everyone who reads this file, so nothing it signs in may hold real data.
+#
+# The issuer is http on loopback, the one http issuer the API accepts
+# (apps/api/src/modules/identity/oidc.provider.ts). compose.yaml runs Dex in the API container's network
+# namespace, so http://localhost:5556 is Dex both from the browser (through the API's published port)
+# and from the API; tests/scripts/local-compose.test.ts keeps both files in step.
+issuer: http://localhost:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  skipApprovalScreen: true
+
+staticClients:
+  - id: getworkdone-local
+    name: GetWorkDone (local)
+    secret: getworkdone-local
+    redirectURIs:
+      - http://localhost:8080/auth/callback
+      # pnpm dev from source: the web dev server proxies /auth to the API (README.md).
+      - http://localhost:5173/auth/callback
+
+# Sign in as admin@example.com with the password getworkdone; Dex stores only its bcrypt hash.
+# Add a second user to try membership: generate a hash with `htpasswd -bnBC 10 "" <password> | tr -d ':\n'`.
+enablePasswordDB: true
+staticPasswords:
+  - email: admin@example.com
+    hash: $2a$10$Qo0noLu1BHAYC1tqF0/zAe5QQnw9/MlFDINkkZtUPdUtsgd88MHeO
+    username: admin
+    userID: 7d4e1c2a-0b6f-4a8e-9c3d-5f2a1b0e9d71

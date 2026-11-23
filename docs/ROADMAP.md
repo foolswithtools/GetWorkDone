@@ -87,4 +87,5 @@ Status markers: planned / in-progress / done. Update at close-out, in the same P
 | [#165](https://github.com/foolswithtools/GetWorkDone-private/issues/165) | fix(test): let the unit partition pass on macOS (bash 3.2 in image-migrate-check.sh, BSD sha256sum in the publish compare tests) | done |
 | [#169](https://github.com/foolswithtools/GetWorkDone-private/issues/169) | fix(deploy): scope the deploy role's rds! master-secret grants to GetWorkDone and drop RotateSecret | done |
 | [#172](https://github.com/foolswithtools/GetWorkDone-private/issues/172) | fix(deps): override @prisma/config's pinned effect to 3.22.1 for GHSA-7589-6fvf-x4pw | done |
+| [#171](https://github.com/foolswithtools/GetWorkDone-private/issues/171) | fix(observability): applyAlerting merges its team=getworkdone route into the shared stack's policy tree instead of replacing it | done |
 | [#130](https://github.com/foolswithtools/GetWorkDone-private/issues/130) | feat(deploy): require TOTP MFA on the sandbox user pools, with k6 answering the code prompt | planned |

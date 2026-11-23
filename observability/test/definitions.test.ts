@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { HTTP_DURATION_BUCKETS } from '../../packages/telemetry/src/metrics.js';
-import { ALERT_FOLDER_UID, CONTACT_POINT_NAME, contactPoints, matchRoute, notificationPolicy } from '../alerting/definitions.js';
+import { ALERT_FOLDER_UID, CONTACT_POINT_NAME, contactPoints, isOwnedRoute, matchRoute, mergePolicy, notificationPolicy, ownedRoute, type Route } from '../alerting/definitions.js';
 import { dashboards } from '../dashboards/definitions.js';
 import { ENVIRONMENTS } from '../lib/environment.js';
 import { DELIVERY_BACKLOG_THRESHOLD, signalRules, toSignalAlertRule } from '../signals/definitions.js';
@@ -155,6 +155,31 @@ describe('alerting definitions', () => {
     expect(matchRoute({ receiver: 'r', routes: [{ object_matchers: [['a', '!=', 'x']], routes: [{ receiver: 'deep', object_matchers: [['b', '=~', 'y.*']] }] }] }, { b: 'yes' }).map((r) => r.receiver ?? '(inherit)'))
       .toEqual(['r', '(inherit)', 'deep']);
     expect(matchRoute({ receiver: 'r', routes: [{ receiver: 'n', object_matchers: [['b', '!~', 'y.*']] }] }, { b: 'yes' })).toHaveLength(1);
+  });
+
+  it('mergePolicy of an empty tree is notificationPolicy() bar the root group_by, and merging a merged tree changes nothing (GWP#171)', () => {
+    expect(mergePolicy({})).toEqual({ tree: { receiver: CONTACT_POINT_NAME, routes: [ownedRoute()] } });
+    expect(mergePolicy({ receiver: 'grafana-default-email', group_by: ['grafana_folder', 'alertname'] }).tree).toEqual(notificationPolicy());
+    const shared: Route = { receiver: 'fleet-default', routes: [{ receiver: 'fleet-loup-ops', object_matchers: [['service', '=', 'loup']] }, { receiver: 'x', group_by: ['a'], object_matchers: [['team', '=', 'getworkdone']] }] };
+    const once = mergePolicy(shared);
+    expect(once.rootNote).toBe('receiver fleet-default is not the stack default, left as is');
+    expect(mergePolicy(once.tree).tree).toEqual(once.tree);
+    // A root already ours is not changed, and is reported only while other tenants' routes share the tree.
+    expect(mergePolicy(notificationPolicy())).toEqual({ tree: notificationPolicy() });
+    const ours = mergePolicy({ ...shared, receiver: CONTACT_POINT_NAME });
+    expect(ours.tree.receiver).toBe(CONTACT_POINT_NAME);
+    expect(ours.rootNote).toContain(`receiver ${CONTACT_POINT_NAME} is not the stack default, left as is`);
+    expect(ours.rootNote).toContain("other tenants' alerts");
+  });
+
+  it('isOwnedRoute owns exactly the team=getworkdone route, with no other or legacy matcher', () => {
+    expect(isOwnedRoute(ownedRoute())).toBe(true);
+    expect(isOwnedRoute({ object_matchers: [['team', '=', 'getworkdone'], ['slo', '=', 'x']] })).toBe(false);
+    expect(isOwnedRoute({ object_matchers: [['team', '!=', 'getworkdone']] })).toBe(false);
+    expect(isOwnedRoute({ object_matchers: [['team', '=', 'other']] })).toBe(false);
+    expect(isOwnedRoute({ object_matchers: [['owner', '=', 'getworkdone']] })).toBe(false);
+    expect(isOwnedRoute({})).toBe(false);
+    for (const legacy of [{ matchers: ['a=b'] }, { match: { a: 'b' } }, { match_re: { a: 'b.*' } }]) expect(isOwnedRoute({ ...ownedRoute(), ...legacy } as Route)).toBe(false);
   });
 });
 
