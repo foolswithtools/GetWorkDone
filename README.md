@@ -5,23 +5,123 @@ A generic internal business app where teams define their own work as capture
 webhook, export), built observability-first. This repository is its public
 copy: clone it and use it how you wish.
 
-No application code is published yet; the first arrives with the first
-snapshot.
+It is a pnpm monorepo: a NestJS API (`apps/api`) that serves a Vite and React
+app (`apps/web`), with shared packages for telemetry, Zod contracts and the
+Prisma schema for Postgres (`packages/`). The [user guide](docs/guide/first-team.md)
+walks through a first team, and [docs/](docs) describes each part of the app.
 
-## Quick start
+## Try it with Docker
 
-Needs Node 20 (see `.nvmrc`) and pnpm 10 (`npm install --global pnpm@10.32.1`).
+Needs only Docker with Compose.
 
 ```
 git clone https://github.com/foolswithtools/GetWorkDone.git
 cd GetWorkDone
-pnpm install --frozen-lockfile
-pnpm lint        # ESLint, then the TypeScript compiler
-pnpm test:unit   # Vitest unit tests
+docker compose up --build
 ```
 
-`bash scripts/ci-guard.sh` checks the workflows (see below); it needs only bash
-and grep.
+Open http://localhost:8080 and sign in as `admin@example.com` with the password
+`getworkdone`. Email outputs land in Mailpit at http://localhost:8025.
+`docker compose down -v` stops everything and deletes the database.
+
+[`compose.yaml`](compose.yaml) runs Postgres 16, the image's migrate command,
+the API, [Dex](https://dexidp.io) as a local sign-in provider
+([`deploy/local/dex.yaml`](deploy/local/dex.yaml)) and Mailpit. This is for
+trying the app out, not for real use:
+
+- every password in it is public;
+- the session cookies are `Secure` over plain http, which Chromium and Firefox
+  accept on `localhost` only;
+- telemetry stays in the process.
+
+To sign in with your own OIDC provider instead of Dex, register
+`http://localhost:8080/auth/callback` with it, then:
+
+```
+export OIDC_ISSUER_URL=https://issuer.example.com OIDC_CLIENT_ID=... OIDC_CLIENT_SECRET=...
+docker compose up --build api mailpit
+```
+
+## Run it from source
+
+You need:
+
+- **Node 24** (`.nvmrc`). `.npmrc` sets `engine-strict=true`, so `pnpm install`
+  fails on any other Node line.
+- **pnpm 10.32.1**: `bash scripts/install-pnpm.sh` installs it from its
+  tarball, checked against a pinned sha512.
+- **Postgres 16.**
+- **An OIDC provider** for sign-in (Dex, Keycloak, Okta, Auth0, Cognito and so
+  on). Without one the app still starts, but `/auth/login` answers 503 and no
+  one can sign in.
+
+```
+pnpm install --frozen-lockfile
+
+docker run -d --name getworkdone-pg -p 5432:5432 \
+  -e POSTGRES_USER=getworkdone -e POSTGRES_PASSWORD=getworkdone -e POSTGRES_DB=getworkdone postgres:16-alpine
+pnpm db:migrate          # the API never migrates by itself
+
+export OTEL_SDK_DISABLED=true   # no OpenTelemetry collector on localhost:4318
+export OIDC_ISSUER_URL=... OIDC_CLIENT_ID=... OIDC_CLIENT_SECRET=... \
+  OIDC_REDIRECT_URI=http://localhost:8080/auth/callback
+pnpm dev                 # API on :8080, the web app's dev server on :5173
+```
+
+The issuer must use https, unless it is plain http on `localhost` or
+`127.0.0.1`.
+
+`pnpm lint` and `pnpm test:unit` need nothing else. `pnpm test:integration`
+and `pnpm e2e` need the Postgres above (`pnpm exec playwright install
+chromium` once for e2e).
+
+## Configuration
+
+The API reads its settings from the environment.
+
+| Variable | Default | What |
+|---|---|---|
+| `DATABASE_URL` | `postgresql://getworkdone:getworkdone@localhost:5432/getworkdone` | Postgres. |
+| `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URI` | unset | Sign-in. Set all four or none; the redirect URI is this app's `/auth/callback`. |
+| `PORT`, `HOST` | `8080`, `0.0.0.0` | Where the API listens. |
+| `TRUST_PROXY_HOPS` | `0` | Proxies in front of the API to trust for the client address; `1` behind one load balancer. |
+| `EMAIL_TRANSPORT` | unset | `smtp` (with `SMTP_URL`) or `ses` (with `AWS_REGION`). Unset, email outputs fail with `email_not_configured`. |
+| `EMAIL_FROM` | unset | The sender of email outputs. |
+| `OTEL_SDK_DISABLED` | unset | `true` keeps telemetry in the process. Otherwise traces, metrics and logs go over OTLP to `OTEL_EXPORTER_OTLP_ENDPOINT` (`http://localhost:4318`). |
+| `GETWORKDONE_ENVIRONMENT`, `GETWORKDONE_INSTANCE`, `GETWORKDONE_VERSION` | `local`, the host name, `dev` | Labels on every span, metric and log line. |
+| `LOG_LEVEL` | `info` | |
+| `LOGIN_RATE_LIMIT` | `20` | Sign-ins a minute per client address. |
+| `R4C_SIGNING_KEY` | unset | The request-4-change feedback widget's key; unset, the widget is hidden ([docs/r4c.md](docs/r4c.md)). |
+
+Quotas, sweeper intervals and the delivery worker have their own settings,
+described in [docs/domain.md](docs/domain.md), [docs/process.md](docs/process.md)
+and [docs/outputs.md](docs/outputs.md).
+
+## Deploying it
+
+The [`Dockerfile`](Dockerfile) builds one image. It serves the API and the web
+app on port 8080 as a non-root user, and it also runs the migrations:
+
+```
+node node_modules/@getworkdone/db/dist/migrate-task.js
+```
+
+This runs `prisma migrate deploy`, then, when `DATABASE_APP_CREDENTIALS` is set
+(`{"username":"getworkdone_app","password":"..."}`), creates the
+least-privilege role the API should connect as. `compose.yaml` shows the order:
+migrate as the database owner, then start the API as `getworkdone_app`.
+
+This repository does not include infrastructure code. To deploy it, you
+provide:
+
+- somewhere to run the container, behind TLS;
+- a managed Postgres;
+- a one-off migrate run before each release;
+- an OIDC provider;
+- an email transport;
+- a place to keep the secrets.
+
+Nothing in the app is tied to a particular cloud.
 
 ## CI
 
