@@ -1,0 +1,15 @@
+# Encoded, dot-segment and backslash /api paths answered by the SPA fallback
+
+Resolved in GWP#30, a follow-up from the GWP#15 whole-branch review. The code predates it (GWP#1, GWP#2). No API data was served.
+
+After GWP#15, a GET whose path spelled `/api` some other way still answered 200 with the SPA's `index.html`, with no session (`curl --path-as-is`): `/%2Fapi/v1/me` and `/%2fapi/v1/me` (encoded slash before `api`), `/api%2Fv1/me` (encoded slash inside the prefix), `/%61pi/v1/me` (encoded letter), `/./api/v1/me` and `/x/../api/v1/me` (dot segments), and `/\api/v1/me` (backslash). Express hands the catch-all `req.path` undecoded, with `\` and dot segments left as sent, and both path checks matched only that form with its leading slashes collapsed: `isReservedPath` (`apps/api/src/spa/spa.controller.ts`) did not see these paths as `/api`, and `isProtectedPath` (`apps/api/src/common/deny-by-default.guard.ts`) did not see them as `/api/v1`. GWP#15's issue text had scoped them out on the belief that percent-encoded slashes already answered 403 or 404; they did not.
+
+Fix: both checks match through `matchesPath` (`apps/api/src/common/path.ts`): a path matches when its as-sent form (leading slashes collapsed, as in GWP#15) or its resolved form matches. The resolved form is `decodeURIComponent`, then `\` read as `/`, then `path.posix.normalize`, which resolves `.` and `..` and collapses repeated slashes. Matching either form only widens a match, so a real `/api/v1` route whose parameter holds `..` or `%2F` stays protected even though its resolved form leaves `/api/v1`. A malformed escape never reaches either check in a running app, because Express answers it 400 ("Failed to decode param") while matching routes; called directly, both checks fail closed and return true. Every path above is now 401 without a session, `/%2Fapi/v10` and other resolved `/api` and `/__r4c` GETs are a JSON 404, and RED records them under `unmatched`. Checked on the image too: `docker build -t getworkdone-api .`, then `curl --path-as-is` of each path gave `401 application/json`.
+
+Tests send these paths with `node:http` (`apps/api/test/support/raw-get.ts`), because supertest parses the URL with WHATWG rules and turns `\` into `/` before the request leaves.
+
+Regression tests:
+
+- `apps/api/test/spa.test.ts`, "encoded, dot-segment and backslash spellings of /api do not reach the SPA: /api/v1 is 401, other /api and /__r4c paths a JSON 404 (GWP#30)", and "a client-side route spelled with dot segments or escapes still loads the SPA (GWP#30)".
+- `apps/api/test/deny-by-default.test.ts`, "encoded, dot-segment and backslash spellings do not take a path out of /api/v1 (GWP#30)", and "a path under /api/v1 as sent stays protected even when its resolved form leaves it, and a malformed escape fails closed (GWP#30)".
+- `apps/api/test/common.test.ts`, "an unstamped request has a zero duration; the SPA catch-all is "spa", or "unmatched" for a reserved path" (`/%2Fapi/x` is `unmatched`), and "isReservedPath covers /api and /__r4c and everything under them, in any case, and nothing else".

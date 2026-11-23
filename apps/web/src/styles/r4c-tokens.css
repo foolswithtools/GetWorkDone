@@ -1,0 +1,15 @@
+/*
+ * The request-4-change widget's six styling tokens (GWP#10, docs/r4c.md; widget contract v1, "Styling"),
+ * set from the base theme (base.css, GWP#47), so the widget follows the theme and its dark scheme. The
+ * widget renders in a shadow root and reads only these; it adopts its own stylesheet, which style-src
+ * 'self' allows. No colour of its own here: change the theme in base.css.
+ */
+r4c-widget {
+  display: block;
+  --r4c-font-family: var(--gwd-font-family);
+  --r4c-color-fg: var(--gwd-color-fg);
+  --r4c-color-bg: var(--gwd-color-bg);
+  --r4c-color-accent: var(--gwd-color-accent);
+  --r4c-radius: var(--gwd-radius);
+  --r4c-spacing: var(--gwd-spacing);
+}
