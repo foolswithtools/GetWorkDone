@@ -1,9 +1,11 @@
 // Provision the alerting objects (alerting/definitions.ts): the folder, the OnCall contact point and the
-// notification policy tree. The contact point's URL is the integration link oncall/apply.ts returned.
+// team=getworkdone route of the notification policy tree. The contact point's URL is the integration
+// link oncall/apply.ts returned. The stack is shared, so the tree is read, merged and written back
+// (mergePolicy, GWP#171): other tenants' routes and a root receiver that is not the default stay.
 
 import type { GrafanaClient, Json } from '../lib/grafana-client.js';
 import { reconcile, type Report } from '../lib/reconcile.js';
-import { ALERT_FOLDER_TITLE, ALERT_FOLDER_UID, CONTACT_POINT_NAME, contactPoints, notificationPolicy } from './definitions.js';
+import { ALERT_FOLDER_TITLE, ALERT_FOLDER_UID, CONTACT_POINT_NAME, contactPoints, mergePolicy, ownedRoute, type Route } from './definitions.js';
 
 export interface AlertingContext {
   grafana: GrafanaClient;
@@ -11,11 +13,11 @@ export interface AlertingContext {
 }
 
 export function planAlerting(): string[] {
-  const policy = notificationPolicy();
+  const route = ownedRoute();
   return [
     `folder ${ALERT_FOLDER_UID} (${ALERT_FOLDER_TITLE})`,
     `contact-point ${CONTACT_POINT_NAME} (oncall): url is the link of oncall-integration, read at apply time`,
-    `notification-policy root -> ${String(policy.receiver)}; ${(policy.routes ?? []).map((r) => `${(r.object_matchers ?? []).map((m) => m.join('')).join(',')} -> ${String(r.receiver)}`).join('; ')}`,
+    `notification-policy root: merge ${(route.object_matchers ?? []).map((m) => m.join('')).join(',')} -> ${String(route.receiver)} into the stack's tree, keeping other routes; root -> ${CONTACT_POINT_NAME} only if it is the stack default`,
   ];
 }
 
@@ -49,16 +51,19 @@ export async function applyAlerting(ctx: AlertingContext, integrationLink: strin
       ctx.report,
     );
   }
-  const policy = notificationPolicy();
+  const POLICIES = '/api/v1/provisioning/policies';
+  // The stack always has a tree; a 404 is merged as an empty one: the OnCall root and the owned route.
+  const live = await ctx.grafana.get<Route>(POLICIES);
+  const { tree, rootNote } = mergePolicy(live ?? {});
+  if (rootNote !== undefined) ctx.report(`notification-policy root: ${rootNote}`);
   await reconcile(
     {
       kind: 'notification-policy',
       name: 'root',
-      desired: policy,
-      read: () => ctx.grafana.get('/api/v1/provisioning/policies'),
-      // The stack always has a tree; "create" only happens if the read failed with 404.
-      create: () => ctx.grafana.put('/api/v1/provisioning/policies', policy),
-      update: () => ctx.grafana.put('/api/v1/provisioning/policies', policy),
+      desired: tree,
+      read: () => ctx.grafana.get(POLICIES),
+      create: () => ctx.grafana.put(POLICIES, tree),
+      update: () => ctx.grafana.put(POLICIES, tree),
     },
     ctx.report,
   );

@@ -135,5 +135,6 @@ A new decision is proposed as the next row of the register, in a small PR to `fo
 | [#165](https://github.com/foolswithtools/GetWorkDone-private/issues/165) | done |
 | [#169](https://github.com/foolswithtools/GetWorkDone-private/issues/169) | done |
 | [#172](https://github.com/foolswithtools/GetWorkDone-private/issues/172) | done |
+| [#171](https://github.com/foolswithtools/GetWorkDone-private/issues/171) | done |
 | [#130](https://github.com/foolswithtools/GetWorkDone-private/issues/130) | planned |
 <!-- state-sync:end -->

@@ -1,0 +1,82 @@
+# GetWorkDone on one machine: docker compose up --build, then http://localhost:8080 and sign in as
+# admin@example.com with the password getworkdone (deploy/local/dex.yaml). Email outputs land in Mailpit
+# at http://localhost:8025. A local trial only: every password here is public and telemetry stays in the
+# process. The session cookies are Secure over plain http, which Chromium and Firefox accept on localhost
+# and Safari does not (sign-in then ends at /auth/callback with "No sign-in in progress"): use Chrome or
+# Firefox. After recreating the api service alone, run `docker compose up -d` so Dex rejoins it.
+#
+# Services: postgres; migrate, the image's one-off migrate command (Dockerfile), as the database owner;
+# api, the image, as the least-privilege getworkdone_app role the migrate run creates
+# (packages/db/sql/app-role.sql); dex, the OIDC issuer, inside the API's network namespace so one
+# loopback issuer URL serves the browser and the API; mailpit, an SMTP sink.
+#
+# Your own issuer instead of Dex: register http://localhost:8080/auth/callback with it, export
+# OIDC_ISSUER_URL, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET (https), and start without Dex:
+#   docker compose up --build api mailpit
+# tests/scripts/local-compose.test.ts checks this file against the Dockerfile, Dex's config and the code.
+name: getworkdone
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    environment:
+      POSTGRES_USER: getworkdone
+      POSTGRES_PASSWORD: getworkdone
+      POSTGRES_DB: getworkdone
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U getworkdone -d getworkdone"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  migrate:
+    build: .
+    command: ["node", "node_modules/@getworkdone/db/dist/migrate-task.js"]
+    environment:
+      DATABASE_URL: postgresql://getworkdone:getworkdone@postgres:5432/getworkdone
+      DATABASE_APP_CREDENTIALS: '{"username":"getworkdone_app","password":"getworkdone_app"}'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:5556:5556" # Dex, which shares this container's network
+    environment:
+      DATABASE_URL: postgresql://getworkdone_app:getworkdone_app@postgres:5432/getworkdone
+      GETWORKDONE_ENVIRONMENT: local
+      GETWORKDONE_INSTANCE: local
+      OTEL_SDK_DISABLED: "true"
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-http://localhost:5556/dex}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-getworkdone-local}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-getworkdone-local}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-http://localhost:8080/auth/callback}
+      EMAIL_TRANSPORT: smtp
+      EMAIL_FROM: getworkdone@example.com
+      SMTP_URL: smtp://mailpit:1025
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  dex:
+    image: ghcr.io/dexidp/dex:v2.46.1@sha256:65b72ca0f4b0bf6d4ada84ec21da8851782563404ac7b8f926923d27ceced9ab
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    network_mode: service:api
+    volumes:
+      - ./deploy/local/dex.yaml:/etc/dex/config.yaml:ro
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.34.0@sha256:23a2ef85bc50853ab3093645d1d64679afd8887e89da5e48a88940c172591a4e
+    ports:
+      - "127.0.0.1:8025:8025"
+    restart: unless-stopped
+
+volumes:
+  postgres:
