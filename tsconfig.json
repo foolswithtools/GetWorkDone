@@ -1,13 +1,10 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "skipLibCheck": true,
-    "types": ["node"]
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
   },
-  "include": ["*.ts", "src/**/*.ts", "tests/**/*.ts"]
+  "include": ["*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
 }

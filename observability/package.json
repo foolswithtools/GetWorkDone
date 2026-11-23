@@ -1,0 +1,14 @@
+{
+  "name": "@getworkdone/observability",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "lint": "eslint --max-warnings=0 .",
+    "apply": "tsx apply.ts"
+  },
+  "devDependencies": {
+    "tsx": "4.23.15"
+  }
+}

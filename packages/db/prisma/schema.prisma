@@ -1,0 +1,301 @@
+// GetWorkDone's database (Postgres; RDS when deployed, GWP#8). The connection URL comes from
+// prisma.config.ts. The domain model (GWP#2, spec §4.3) is described in docs/domain.md.
+//
+// Tenancy is team-scoped rows in one database: every table except ItemEvent carries teamId, and the
+// composite foreign keys below make a row's teamId match its parent's, so an item can never point at
+// another team's work type version. ItemEvent is reached only through its item.
+//
+// Session and LoginAttempt (GWP#3) hold sign-in state, and LoginRateWindow (GWP#32) the sign-in rate
+// limit's per-address counts; docs/auth.md describes them. QuotaWindow (GWP#50) holds the quotas'
+// counts; docs/domain.md describes them.
+//
+// Delivery, OutputSecret and Export (GWP#6) hold distribution state; docs/outputs.md describes them.
+//
+// Two rules live in the migration SQL because Prisma cannot express them: ItemEvent rows are
+// append-only, and WorkTypeVersion rows are never updated or deleted (both are triggers that raise).
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+  previewFeatures     = ["partialIndexes"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TeamRole {
+  member
+  admin
+}
+
+/// Matches ItemStatus in @getworkdone/contracts (domain.ts).
+enum ItemStatus {
+  open
+  in_progress
+  completed
+  failed
+  cancelled
+}
+
+model Team {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  members          TeamMember[]
+  workTypes        WorkType[]
+  workTypeVersions WorkTypeVersion[]
+  items            Item[]
+  deliveries       Delivery[]
+  outputSecrets    OutputSecret[]
+  exports          Export[]
+}
+
+model TeamMember {
+  id        String   @id @default(uuid())
+  teamId    String
+  /// The identity's subject (the OIDC `sub`, GWP#3).
+  subject   String
+  role      TeamRole
+  createdAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id])
+
+  @@unique([teamId, subject])
+  @@index([subject])
+}
+
+model WorkType {
+  id         String    @id @default(uuid())
+  teamId     String
+  slug       String
+  createdAt  DateTime  @default(now())
+  /// GWP#55: set while the work type is archived; capture and new versions are then 409, its items stay readable.
+  archivedAt DateTime?
+
+  team          Team              @relation(fields: [teamId], references: [id])
+  versions      WorkTypeVersion[]
+  outputSecrets OutputSecret[]
+  exports       Export[]
+
+  @@unique([teamId, slug])
+  @@unique([id, teamId])
+}
+
+/// Immutable: never updated or deleted; a change to a work type writes the next version (database trigger).
+model WorkTypeVersion {
+  id         String   @id @default(uuid())
+  teamId     String
+  workTypeId String
+  version    Int
+  /// Validated by WorkTypeDefinition (@getworkdone/contracts) before every write.
+  definition Json
+  createdAt  DateTime @default(now())
+
+  team     Team     @relation(fields: [teamId], references: [id])
+  workType WorkType @relation(fields: [workTypeId, teamId], references: [id, teamId])
+  items    Item[]
+
+  @@unique([workTypeId, version])
+  @@unique([id, teamId])
+}
+
+model Item {
+  id                String     @id @default(uuid())
+  teamId            String
+  workTypeVersionId String
+  data              Json
+  status            ItemStatus @default(open)
+  currentStepIndex  Int        @default(0)
+  /// Optimistic locking: every update matches on the version it read and increments it.
+  rowVersion        Int        @default(0)
+  /// GWP#55: the assigneeRole of the human step the item is waiting at, else null. Set by the transition
+  /// that starts a human step, cleared by every other transition but a data edit (which moves no step).
+  waitingRole       TeamRole?
+  /// GWP#102: set by the stuck-item sweeper after an advance it could not make, to when it may try the
+  /// item again; the sweeper lists only items where it is null or past. Cleared by every transition.
+  sweepRetryAt      DateTime?
+  /// GWP#102: how many advances in a row the sweeper could not make; doubles its wait. Every transition
+  /// sets it back to 0.
+  sweepFailures     Int        @default(0)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  team            Team            @relation(fields: [teamId], references: [id])
+  workTypeVersion WorkTypeVersion @relation(fields: [workTypeVersionId, teamId], references: [id, teamId])
+  events          ItemEvent[]
+  deliveries      Delivery[]
+
+  @@unique([id, teamId])
+  /// The items list's order within one status (GWP#54: `?status=` beside the (createdAt, id) cursor);
+  /// its leading teamId serves every other team-scoped read.
+  @@index([teamId, status, createdAt, id])
+  /// The waiting-for-me queue's order within one role (GWP#55: `?waiting=me` beside the cursor).
+  @@index([teamId, waitingRole, createdAt, id])
+  /// The stuck-item sweeper's scan (GWP#157, docs/process.md "Resume"): `open` and `in_progress` items not
+  /// waiting at a human step, oldest update first. Partial (the partialIndexes preview), so `prisma migrate
+  /// diff` checks the condition too; the migration builds it CONCURRENTLY.
+  @@index([status, updatedAt], map: "Item_status_updatedAt_waiting_null_idx", where: raw("(\"waitingRole\" IS NULL)"))
+}
+
+/// Append-only audit trail (database trigger): rows are never updated or deleted, and survive the
+/// `none` output clearing Item.data at completion (D-048).
+model ItemEvent {
+  id           String   @id @default(uuid())
+  itemId       String
+  /// 1, 2, 3, ... within the item.
+  seq          Int
+  type         String
+  /// Null for events no person caused (automated steps, GWP#5).
+  actorSubject String?
+  at           DateTime @default(now())
+  payload      Json
+
+  item Item @relation(fields: [itemId], references: [id])
+
+  @@unique([itemId, seq])
+}
+
+/// A person's profile as their identity provider last asserted it (GWP#99, docs/auth.md "Team membership"):
+/// upserted with the session row on every sign-in, never written from anywhere else. Not keyed by team and
+/// with no foreign key to TeamMember, so a subject can be a member before it has an Identity, and removing a
+/// member leaves it. Read only by the members list, for the team's admins.
+model Identity {
+  /// The OIDC `sub`; TeamMember.subject and Session.subject hold the same value.
+  subject     String   @id
+  email       String
+  /// The `name` claim, else `preferred_username`; null when the provider asserted neither.
+  displayName String?
+  /// The last sign-in. The session purge deletes the row 90 days after it once the subject is in no team and has
+  /// no unexpired session (GWP#143, docs/auth.md "Team membership").
+  updatedAt   DateTime @updatedAt
+
+  @@index([updatedAt])
+}
+
+/// A signed-in browser session (GWP#3, docs/auth.md). The `__Host-gwd_session` cookie holds a random token;
+/// only its SHA-256 is stored, as the id. The expiry is absolute (8 hours); logout deletes the row.
+model Session {
+  id          String   @id
+  /// The identity's subject (the OIDC `sub`); TeamMember.subject holds the same value.
+  subject     String
+  email       String
+  displayName String?
+  /// Sent back by the SPA in the X-GWD-CSRF header on every state-changing request.
+  csrfToken   String
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([subject])
+  @@index([expiresAt])
+}
+
+/// A sign-in between /auth/login and /auth/callback (GWP#3): the state, nonce and PKCE verifier the
+/// callback checks. The `__Host-gwd_login` cookie holds a random token; only its SHA-256 is stored, as the
+/// id. Used once (the callback deletes it) and valid for 10 minutes.
+model LoginAttempt {
+  id           String   @id
+  state        String
+  nonce        String
+  codeVerifier String
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+
+  @@index([expiresAt])
+}
+
+/// One client key's GET /auth/login count in the minute from windowStart (login-rate-limit.ts, GWP#32).
+model LoginRateWindow {
+  key         String   @id
+  windowStart DateTime
+  count       Int
+
+  @@index([windowStart])
+}
+
+/// A quota's fixed window for one key (GWP#50, apps/api/src/common/quota.ts): `teams:<subject>`,
+/// `items:<subject>`, `deliveries:<teamId>`, `exports:<teamId>`. Not in LoginRateWindow, whose purge
+/// ends every window after a minute: the purge ends these at windowStart + windowMs.
+model QuotaWindow {
+  key         String   @id
+  windowStart DateTime
+  windowMs    Int
+  count       Int
+
+  @@index([windowStart])
+}
+
+/// Matches DeliveryStatus in @getworkdone/contracts (distribute.ts).
+enum DeliveryStatus {
+  pending
+  delivered
+  failed
+}
+
+/// One email or webhook output's delivery of one completed item (GWP#6, docs/outputs.md). Written in the
+/// item's `completed` transition, so a completed item always has its rows. A worker claims a due
+/// pending row with SELECT ... FOR UPDATE SKIP LOCKED; a delivered row is never sent again.
+model Delivery {
+  id             String         @id @default(uuid())
+  teamId         String
+  itemId         String
+  outputId       String
+  /// `email` or `webhook`.
+  kind           String
+  /// `<itemId>:<outputId>`, sent as the webhook's Idempotency-Key on every attempt.
+  idempotencyKey String         @unique
+  status         DeliveryStatus @default(pending)
+  /// Attempts started; a claim counts one before it sends.
+  attempts       Int            @default(0)
+  lastError      String?
+  /// When a pending row is next due: the backoff after a retryable failure, or the end of a claim's lease.
+  nextAttemptAt  DateTime       @default(now())
+  deliveredAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  team Team @relation(fields: [teamId], references: [id])
+  item Item @relation(fields: [itemId, teamId], references: [id, teamId])
+
+  @@index([status, nextAttemptAt])
+  @@index([itemId])
+}
+
+/// A webhook output's signing secret (GWP#6). Generated when a definition with a new webhook output id is
+/// saved and shown once in that save's answer; kept per work type and output id, so later versions keep
+/// it. Never part of a definition, which every team member can read.
+model OutputSecret {
+  id         String   @id @default(uuid())
+  teamId     String
+  workTypeId String
+  outputId   String
+  secret     String
+  createdAt  DateTime @default(now())
+
+  team     Team     @relation(fields: [teamId], references: [id])
+  workType WorkType @relation(fields: [workTypeId, teamId], references: [id, teamId])
+
+  @@unique([workTypeId, outputId])
+}
+
+/// A CSV or JSON file of a work type's completed items, generated on request (GWP#6); at most 10 MB.
+model Export {
+  id               String   @id @default(uuid())
+  teamId           String
+  workTypeId       String
+  /// `csv` or `json`.
+  format           String
+  content          Bytes
+  sizeBytes        Int
+  itemCount        Int
+  createdBySubject String
+  createdAt        DateTime @default(now())
+
+  team     Team     @relation(fields: [teamId], references: [id])
+  workType WorkType @relation(fields: [workTypeId, teamId], references: [id, teamId])
+
+  @@index([teamId, workTypeId])
+}

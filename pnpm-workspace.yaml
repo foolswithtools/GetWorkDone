@@ -1,0 +1,22 @@
+# apps/ are the API and the SPA it serves; packages/ are shared libraries; observability/ is the
+# Grafana Cloud configuration as code (spec §4.3, D-026, D-027).
+packages:
+  - 'apps/*'
+  - 'packages/*'
+  - 'observability'
+
+# Install scripts run only for these. @datadog/pprof is the native profiler addon under
+# @pyroscope/nodejs (packages/telemetry/src/profiling.ts); the image builds it for linux.
+onlyBuiltDependencies:
+  - '@datadog/pprof'
+  - '@prisma/engines'
+  - '@swc/core'
+  - esbuild
+  - prisma
+
+# #51: a release is installed only once it is seven days old (minutes; pnpm reads this from 10.16). It
+# bites on pnpm add, pnpm update and Renovate's lockfile refresh; pnpm install --frozen-lockfile never
+# re-resolves. A package that must come in sooner is named here, with the reason in the PR (README.md,
+# "Dependencies").
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude: []

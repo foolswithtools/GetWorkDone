@@ -1,0 +1,222 @@
+# Observability coverage manifest for GetWorkDone (GWP#1), in the shape of the exemplar-shop's
+# specs/observability-coverage.yaml @ 12a071e (`features:` :14, entry shape :57-63, `out_of_scope:`
+# :191). The exemplar's statuses were edited by hand (prebutton.md:350); since GWP#7 no entry carries
+# one. Each feature names the check that proves it:
+#
+#   features:      id, name, check, and slice "#N" when another slice delivers it
+#                  - check { kind: test, file, test }: the test that proves it, read from this run's
+#                    test reports;
+#                  - check { kind: live, query }: an id in observability/live/queries.ts, run against
+#                    the stack after deploy by scripts/verify-live.ts (GWP#9).
+#   out_of_scope:  id, name, reason.
+#
+# scripts/coverage-status.ts runs the checks and writes reports/coverage-status.json; scripts/coverage-check.ts
+# is the gate and reads only that file. It also enforces the D-026 rules, which editing this file
+# cannot relax.
+
+features:
+  - id: otel-traces
+    name: Spans exported over OTLP to the Alloy sidecar with the four resource attributes
+    check:
+      kind: test
+      file: packages/telemetry/src/otel.test.ts
+      test: "an exported span carries service.name, service.version, deployment.environment and prebutton.instance"
+  - id: otel-metrics
+    name: Metrics exported over OTLP with the four resource attributes
+    check:
+      kind: test
+      file: packages/telemetry/src/otel.test.ts
+      test: "an exported metric carries the same four resource attributes"
+  - id: otel-logs
+    name: Logs exported as OpenTelemetry log records carrying trace_id and span_id (D-044)
+    check:
+      kind: test
+      file: packages/telemetry/src/logs.test.ts
+      test: "a line logged inside an active span is exported once as an OTel log record with its trace_id, span_id and the four resource attributes (D-044)"
+  - id: traces-propagation
+    name: The browser's traceparent continues into the API request span
+    check:
+      kind: test
+      file: tests/e2e/smoke.spec.ts
+      test: "/ shows GetWorkDone, and the API span joins the browser traceparent trace"
+  - id: red-metrics
+    name: RED metrics record the final status, after the exception filter
+    check:
+      kind: test
+      file: apps/api/test/red.integration.test.ts
+      test: "a handler throwing a 500 records status_class=\"5xx\" in http_server_requests_total, never 2xx"
+  - id: red-latency-buckets
+    name: The request duration histogram keeps the 0.8 s latency SLO boundary
+    check:
+      kind: test
+      file: packages/telemetry/src/metrics.test.ts
+      test: "0.8 is a bucket boundary of http_server_request_duration_seconds"
+  - id: log-redaction
+    name: Log lines and log records never carry tokens or secrets
+    check:
+      kind: test
+      file: packages/telemetry/src/logger.test.ts
+      test: "redacts a JWT, a ghs_ token, a bearer header and a client_secret field"
+  - id: profiles
+    name: Continuous profiles pushed to the Alloy sidecar's Pyroscope receiver
+    check:
+      kind: test
+      file: packages/telemetry/src/profiling.test.ts
+      test: "pushes to the Alloy sidecar on :4040 tagged with the version, environment and instance"
+  - id: distribution-spans
+    name: Each delivery attempt runs in a distribute.deliver span with output.kind and delivery.attempt (GWP#6)
+    check:
+      kind: test
+      file: apps/api/test/delivery.integration.test.ts
+      test: "completing an item with a webhook output produces exactly one POST carrying Idempotency-Key <itemId>:<outputId>"
+  - id: distribution-metrics
+    name: distribution_deliveries_total counts delivery attempts by kind and status (GWP#6)
+    check:
+      kind: test
+      file: packages/telemetry/src/metrics.test.ts
+      test: "distribution_deliveries_total counts each attempt by output kind and outcome"
+  - id: session-purge-metrics
+    name: session_purge_runs_total, session_purge_duration_seconds and session_purge_rows_deleted_total record each purge of expired sign-ins and sessions (GWP#16)
+    check:
+      kind: test
+      file: packages/telemetry/src/metrics.test.ts
+      test: "session_purge_runs_total, session_purge_duration_seconds and session_purge_rows_deleted_total record each purge run"
+  - id: process-sweeper-metrics
+    name: process_sweeper_runs_total and process_sweeper_items_total record each run of the stuck-item sweeper and its items by result (GWP#55)
+    check:
+      kind: test
+      file: packages/telemetry/src/metrics.test.ts
+      test: "process_sweeper_runs_total and process_sweeper_items_total record each sweep and its items by result"
+  - id: ecs-container-insights
+    name: ECS Container Insights task and service metrics (replaces host-infra-metrics, D-026)
+    slice: "#8"
+    check:
+      kind: live
+      query: ecs-container-insights
+  - id: alb-metrics
+    name: ALB request, latency and 5xx metrics (D-026)
+    slice: "#8"
+    check:
+      kind: live
+      query: alb-metrics
+  - id: alloy-pipeline
+    name: Alloy sidecar forwards OTLP traces, metrics and logs to Grafana Cloud (D-027, D-044)
+    slice: "#8"
+    check:
+      kind: live
+      query: alloy-pipeline
+  - id: red-synthetic-label
+    name: RED metrics mark probe traffic (a subject in SYNTHETIC_SUBJECTS) synthetic="true", which the SLOs leave out (GWP#7, GWP#9)
+    check:
+      kind: test
+      file: apps/api/test/red.integration.test.ts
+      test: "a request from a subject in SYNTHETIC_SUBJECTS records synthetic=\"true\" on both recording paths; the x-synthetic header is ignored"
+  - id: slo-burn-rate-alerts
+    name: Availability and latency SLOs, each with a fast and a slow burn-rate rule, as code (GWP#7)
+    check:
+      kind: test
+      file: observability/test/definitions.test.ts
+      test: "every SLO, including latency, has both a fast and a slow burn rule referencing it"
+  - id: alert-oncall-routing
+    name: Every burn-rate rule reaches the OnCall contact point through the notification policy tree (GWP#7)
+    check:
+      kind: test
+      file: observability/test/definitions.test.ts
+      test: "every rule's labels reach the OnCall receiver through the notification policy tree"
+  - id: oncall-routing
+    name: OnCall escalation pages the prebutton-maintainers team, as code (GWP#7, D-042)
+    check:
+      kind: test
+      file: observability/test/oncall.test.ts
+      test: "the escalation chain's only target is the prebutton-maintainers OnCall team"
+  - id: observability-apply-verified
+    name: apply.ts reads every object back and exits 1 on a mismatch (GWP#7)
+    check:
+      kind: test
+      file: observability/test/apply.test.ts
+      test: "a read-back mismatch exits 1 and names the object"
+  - id: alert-fault-injection
+    name: A fault-injected burn fires the fast-burn rule and pages through OnCall (GWP#9)
+    slice: "#9"
+    check:
+      kind: live
+      query: burn-rate-alert-pages-oncall
+  - id: synthetic-smoke
+    name: k6 smoke and live verification
+    slice: "#9"
+    check:
+      kind: live
+      query: k6-smoke
+  - id: deployed-version
+    name: The deployed commit reaches the stack as service.version on target_info (GWP#9)
+    slice: "#9"
+    check:
+      kind: live
+      query: deployed-version
+  - id: trace-end-to-end
+    name: The API server span continues the browser-sent traceparent, live in Tempo (GWP#9, D-089)
+    slice: "#9"
+    check:
+      kind: live
+      query: trace-end-to-end
+  - id: logs-trace-correlation
+    name: API log lines reach Loki carrying the request's trace_id (GWP#9, D-044)
+    slice: "#9"
+    check:
+      kind: live
+      query: logs-trace-correlation
+  - id: profiles-live
+    name: Profiles for getworkdone-api reach the stack's Pyroscope, per environment (GWP#9)
+    slice: "#9"
+    check:
+      kind: live
+      query: profiles
+  - id: oncall-routing-live
+    name: The OnCall integration exists and the team=getworkdone route reaches getworkdone-oncall, read back live (GWP#9)
+    slice: "#9"
+    check:
+      kind: live
+      query: oncall-routing
+  - id: telemetry-heartbeat
+    name: A telemetry heartbeat rule pages when session_purge_runs_total stops arriving for 10 minutes; every rule keeps noDataState OK (GWP#53)
+    check:
+      kind: test
+      file: observability/test/definitions.test.ts
+      test: "the heartbeat's expression is absent_over_time over session_purge_runs_total with an exact deployment_environment"
+  - id: delivery-failure-alert
+    name: A failed delivery opens a warning alert group; a backlog over 50 pending deliveries for 30 minutes warns (GWP#53)
+    check:
+      kind: test
+      file: observability/test/definitions.test.ts
+      test: "the delivery rules count failed deliveries over 1 h and hold the backlog above 50 for 30 minutes"
+  - id: delivery-backlog-gauge
+    name: distribution_deliveries_pending counts the pending Delivery rows on each export (GWP#53)
+    check:
+      kind: test
+      file: apps/api/test/delivery-backlog.integration.test.ts
+      test: "with two pending rows and one delivered the gauge reads 2; after the worker delivers one, 1"
+  - id: database-ready-gauge
+    name: The in-process readiness check records database_ready 1 or 0 for the database unreachable rule (GWP#53)
+    check:
+      kind: test
+      file: apps/api/test/readiness.integration.test.ts
+      test: "the in-process check records database_ready 1, and 0 once the database URL points at a closed port"
+  - id: burn-rate-traffic-floor
+    name: The burn-rate rules stay quiet below 20 real requests in 5 minutes (fast) or 100 in 6 hours (slow) (D-090, GWP#53)
+    check:
+      kind: test
+      file: tests/scripts/burn-guard.test.ts
+      test: "fast availability: 19 requests, all 5xx, return nothing, though the threshold alone would fire"
+  - id: readiness
+    name: The deployed API answers GET /readyz with 200 and database ok, live (GWP#53)
+    slice: "#53"
+    check:
+      kind: live
+      query: readyz
+out_of_scope:
+  - id: beyla-ebpf
+    name: Beyla eBPF auto-instrumentation (exemplar :43)
+    reason: "Fargate: no eBPF and no host access"
+  - id: host-infra-metrics
+    name: Host infrastructure metrics (exemplar :57-63)
+    reason: "Fargate: no eBPF and no host access"

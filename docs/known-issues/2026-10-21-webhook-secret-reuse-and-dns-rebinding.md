@@ -1,0 +1,17 @@
+# A re-added webhook kept its old secret, the address check could be rebound, and a lapsed last attempt could be sent a fourth time
+
+Resolved before merge, GWP#6. Found by the fresh-context whole-branch review.
+
+**Secret reuse.** A webhook output's signing secret was kept per work type and output id and issued only for an id with no secret yet. The output editor names new outputs `output_N`, the first free number among the outputs on screen, so an admin who removed a webhook, saved, and later added one for another receiver got the same id back: the save answered no `webhookSecrets`, and deliveries were signed with the first secret, which the new receiver never saw. Fix: a save issues a new secret for each webhook output it adds, meaning its id was not a webhook output in the version before, replacing any old secret for that id (`issueWebhookSecrets` in `apps/api/src/modules/work-types/work-types.service.ts`). A webhook carried over keeps its secret.
+
+**DNS rebinding.** The webhook adapter resolved the host and checked every address, then called `fetch`, which resolved the name again to connect. A name whose answer changed in between (first a public address, then `10.x` or `169.254.170.2`) passed the check and reached the blocked address, and the answer's status showed in the deliveries panel. Any signed-in user can create a team and so a webhook. Fix: the POST goes through undici's `fetch` with an `Agent` whose connect-time `lookup` resolves and checks the name again and refuses a blocked address, so the address dialled is one that was checked (`apps/api/src/modules/distribute/webhook.adapter.ts`).
+
+**A fourth attempt.** A claim counts the attempt and leases the row; if the worker died during the third attempt, the lease lapsed and the next claim sent it a fourth time. Fix: a due row that has used its last attempt is ended `failed` with reason `interrupted` and a `delivery_failed` event instead (`claim` in `apps/api/src/modules/distribute/delivery.worker.ts`). The same review made the worker stop claiming once the app is closing.
+
+Regression tests:
+
+- `apps/api/test/delivery.integration.test.ts`, "a webhook id removed and added again gets a new secret, shown once: never the old receiver's".
+- `apps/api/test/webhook.adapter.test.ts`, "DNS rebinding: a name that resolves public for the check and private for the connection is refused, with no connection", and "the connection is made to the address that was checked".
+- `apps/api/test/delivery.integration.test.ts`, "a crash during the last attempt never makes a fourth: the lapsed claim ends the row failed".
+
+**A deadline that never fired on Node 20.** Found by CI on the PR, after the review. Each attempt's deadline was `AbortSignal.any([ctx.signal, AbortSignal.timeout(ms)])`. On Node 20, the runtime of CI and the image, that composed signal never aborted, so a receiver that answered after 15 s was recorded `delivered` despite the 10 s deadline. Local runs on a newer Node passed. Fix: `deadline()` in `apps/api/src/modules/distribute/deadline.ts`, a plain `AbortController` with `setTimeout` that also follows the worker's signal and is cleared after each attempt, used by the webhook and email adapters and the worker. Regression tests: `apps/api/test/webhook.adapter.test.ts`, "a target that sleeps 15 s is aborted at 10 s and returns retryable" (now run on Node 20 in CI), and `apps/api/test/deadline.test.ts`.

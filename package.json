@@ -1,24 +1,47 @@
 {
-  "name": "getworkdone",
+  "name": "getworkdone-private",
   "version": "0.0.0",
   "private": true,
-  "license": "MIT",
   "type": "module",
-  "main": "src/index.ts",
   "packageManager": "pnpm@10.32.1",
   "engines": {
-    "node": ">=20.20.2"
+    "node": ">=24.0.0 <25"
   },
   "scripts": {
-    "lint": "eslint --max-warnings=0 . && tsc -p .",
-    "test:unit": "vitest run"
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck && tsc -p .",
+    "lint": "turbo run lint && eslint --max-warnings=0 scripts tests \"*.ts\" \"*.js\" && tsx scripts/state-sync.ts --check",
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "e2e": "playwright test",
+    "db:migrate": "pnpm --filter @getworkdone/db db:migrate"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@types/node": "20.19.43",
+    "@nestjs/common": "11.2.7",
+    "@playwright/test": "1.63.0",
+    "@swc/core": "1.16.13",
+    "@types/node": "24.19.2",
+    "@types/supertest": "7.2.1",
+    "@vitest/coverage-v8": "4.1.11",
     "eslint": "10.12.0",
+    "supertest": "7.3.1",
+    "tsx": "4.23.15",
+    "turbo": "2.11.8",
     "typescript": "5.9.3",
     "typescript-eslint": "8.71.2",
-    "vitest": "4.1.11"
+    "unplugin-swc": "1.6.0",
+    "vitest": "4.1.11",
+    "yaml": "2.9.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "@nestjs/platform-express>multer": "2.5.0",
+      "@prisma/config>effect": "3.22.1"
+    },
+    "auditConfig": {
+      "ignoreCves": []
+    }
   }
 }
