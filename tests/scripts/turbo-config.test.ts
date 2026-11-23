@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { envNamesReadByCode } from './env-names.ts';
 
 interface Task {
   dependsOn?: string[];
+  passThroughEnv?: string[];
 }
 
 const turbo = JSON.parse(readFileSync(new URL('../../turbo.json', import.meta.url), 'utf8')) as { tasks: Record<string, Task> };
@@ -29,5 +31,16 @@ describe('turbo task graph', () => {
         expect(ordered, `@getworkdone/db#${a} and #${b} both run prisma generate and must not run in parallel`).toBe(true);
       }
     }
+  });
+
+  // Turbo 2 runs tasks in strict env mode: a variable not declared for a task never reaches it, so
+  // `DATABASE_URL=... OIDC_ISSUER_URL=... pnpm dev` ran the API with none of them and /auth/login
+  // answered 503 (docs/known-issues/2026-11-22-pnpm-dev-drops-env.md).
+  it('passes every variable the API reads through to pnpm dev', () => {
+    const patterns = turbo.tasks.dev?.passThroughEnv ?? [];
+    const covered = (name: string) => patterns.some((p) => (p.endsWith('*') ? name.startsWith(p.slice(0, -1)) : name === p));
+    const names = [...envNamesReadByCode()];
+    expect(names).toEqual(expect.arrayContaining(['DATABASE_URL', 'OIDC_ISSUER_URL', 'QUOTA_WORK_TYPES_PER_TEAM', 'OTEL_SDK_DISABLED']));
+    expect(names.filter((name) => !covered(name))).toEqual([]);
   });
 });

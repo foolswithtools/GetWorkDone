@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { main } from '../apply.js';
+import { notificationPolicy, type Route } from '../alerting/definitions.js';
 import { signalRules } from '../signals/definitions.js';
 import { burnRateRules } from '../slo/definitions.js';
 import { createFakeGrafana, ONCALL_URL, OWNER_LOGIN, STACK_URL } from './fake-grafana.js';
@@ -192,6 +193,101 @@ describe('apply.ts live', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('401');
     expect(result.stderr).not.toContain('wrong');
+  });
+});
+
+describe('apply.ts on a shared stack: the notification policy is read, merged and written back (GWP#171)', () => {
+  const POLICIES = `${STACK_URL}/api/v1/provisioning/policies`;
+  const LOUP: Route = { receiver: 'fleet-loup-ops', object_matchers: [['service', '=', 'loup']], group_by: ['creature', 'alertname'] };
+  const OTHER: Route = { receiver: 'someone-elses-point', object_matchers: [['team', '=', 'other']] };
+  const desiredRoute = () => notificationPolicy().routes![0]!;
+  const seed = (fake: ReturnType<typeof createFakeGrafana>, tree: Route) =>
+    fake.fetch(POLICIES, { method: 'PUT', headers: { authorization: 'Bearer glsa_test' }, body: JSON.stringify(tree) });
+  const tree = async (fake: ReturnType<typeof createFakeGrafana>) => (await (await fake.fetch(POLICIES, { headers: { authorization: 'Bearer glsa_test' } })).json()) as Route;
+  const policyPuts = (fake: ReturnType<typeof createFakeGrafana>, from: number) => fake.writes().slice(from).filter((c) => c.url === POLICIES);
+  const owned = (t: Route) => (t.routes ?? []).filter((r) => JSON.stringify(r.object_matchers) === JSON.stringify([['team', '=', 'getworkdone']]));
+
+  it('keeps a foreign route in order and a foreign root receiver, and adds exactly one team=getworkdone route', async () => {
+    const fake = createFakeGrafana();
+    await seed(fake, { receiver: 'fleet-default', group_by: ['grafana_folder', 'alertname'], routes: [LOUP] });
+    const result = await run([], LIVE_ENV, fake.fetch);
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    const after = await tree(fake);
+    expect(after.receiver).toBe('fleet-default');
+    expect(after.routes).toEqual([LOUP, desiredRoute()]);
+    expect(owned(after)).toEqual([desiredRoute()]);
+    expect(result.stdout).toContain('notification-policy root: receiver fleet-default is not the stack default, left as is');
+  });
+
+  it('replaces a stale team=getworkdone route in place, not duplicated, and drops a second copy', async () => {
+    const fake = createFakeGrafana();
+    const stale: Route = { ...desiredRoute(), group_by: ['alertname'] };
+    await seed(fake, { receiver: 'fleet-default', routes: [LOUP, stale, OTHER, stale] });
+    const result = await run([], LIVE_ENV, fake.fetch);
+    expect(result.status).toBe(0);
+    const after = await tree(fake);
+    expect(after.routes).toEqual([LOUP, desiredRoute(), OTHER]);
+    expect(result.stdout).toContain('updated notification-policy root');
+  });
+
+  it('treats a route matching team=getworkdone and another label, or with legacy matchers, as foreign', async () => {
+    const fake = createFakeGrafana();
+    const narrower: Route = { receiver: 'fleet-default', object_matchers: [['team', '=', 'getworkdone'], ['severity', '=', 'critical']] };
+    const legacy = { ...desiredRoute(), group_by: ['alertname'], matchers: ['env=x'] } as Route;
+    await seed(fake, { receiver: 'fleet-default', routes: [narrower, legacy, LOUP] });
+    expect((await run([], LIVE_ENV, fake.fetch)).status).toBe(0);
+    expect((await tree(fake)).routes).toEqual([narrower, legacy, LOUP, desiredRoute()]);
+  });
+
+  it('a stack whose tree is already merged gets no policy PUT', async () => {
+    const fake = createFakeGrafana();
+    await seed(fake, { receiver: 'fleet-default', group_by: ['grafana_folder', 'alertname'], routes: [LOUP, desiredRoute(), OTHER] });
+    const before = fake.writes().length;
+    const result = await run([], LIVE_ENV, fake.fetch);
+    expect(result.status).toBe(0);
+    expect(policyPuts(fake, before)).toEqual([]);
+    expect(result.stdout).toContain('unchanged notification-policy root');
+    const settled = fake.writes().length;
+    expect((await run([], LIVE_ENV, fake.fetch)).status).toBe(0);
+    expect(fake.writes().slice(settled)).toEqual([]);
+  });
+
+  it('sets a default (grafana-default-email) or empty root receiver to getworkdone-oncall and keeps foreign routes', async () => {
+    for (const receiver of ['grafana-default-email', '', undefined]) {
+      const fake = createFakeGrafana();
+      await seed(fake, { receiver, group_by: ['grafana_folder', 'alertname'], routes: [LOUP] });
+      const result = await run([], LIVE_ENV, fake.fetch);
+      expect(result.status, String(receiver)).toBe(0);
+      const after = await tree(fake);
+      expect(after.receiver).toBe('getworkdone-oncall');
+      expect(after.group_by).toEqual(['grafana_folder', 'alertname']);
+      expect(after.routes).toEqual([LOUP, desiredRoute()]);
+      expect(result.stdout).not.toContain('left as is');
+    }
+  });
+
+  it('keeps a getworkdone-oncall root on a shared tree and reports that it catches other tenants\' unmatched alerts', async () => {
+    const fake = createFakeGrafana();
+    await seed(fake, { receiver: 'getworkdone-oncall', routes: [desiredRoute()] });
+    expect((await run([], LIVE_ENV, fake.fetch)).stdout).not.toContain('notification-policy root: receiver');
+    await seed(fake, { receiver: 'getworkdone-oncall', routes: [LOUP, desiredRoute()] });
+    const before = fake.writes().length;
+    const result = await run([], LIVE_ENV, fake.fetch);
+    expect(result.status).toBe(0);
+    expect(policyPuts(fake, before)).toEqual([]);
+    expect((await tree(fake)).receiver).toBe('getworkdone-oncall');
+    expect(result.stdout).toContain("notification-policy root: receiver getworkdone-oncall is not the stack default, left as is; it also receives other tenants' alerts that no route matches");
+  });
+
+  it('sends back the root timings and nested routes it read, without the provenance field', async () => {
+    const fake = createFakeGrafana();
+    const nested: Route = { ...LOUP, routes: [{ receiver: 'deep', object_matchers: [['team', '=', 'getworkdone']] }] };
+    await seed(fake, { receiver: 'grafana-default-email', group_wait: '10s', routes: [nested], provenance: 'api' } as Route);
+    const before = fake.writes().length;
+    expect((await run([], LIVE_ENV, fake.fetch)).status).toBe(0);
+    const [put] = policyPuts(fake, before);
+    expect(put!.body).toEqual({ receiver: 'getworkdone-oncall', group_wait: '10s', routes: [nested, desiredRoute()] });
   });
 });
 

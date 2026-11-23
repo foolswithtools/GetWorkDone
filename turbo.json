@@ -17,7 +17,13 @@
     "dev": {
       "dependsOn": ["^build"],
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "passThroughEnv": [
+        "AWS_*", "DATABASE_*", "DELIVERY_POLL_MS", "ECS_CONTAINER_METADATA_URI_V4", "EMAIL_*", "FAULT_*",
+        "GETWORKDONE_*", "HOST", "IDENTITY_PROVIDER", "LOG_*", "LOGIN_RATE_LIMIT", "NODE_ENV", "OIDC_*", "OTEL_*",
+        "PORT", "PYROSCOPE_*", "QUOTA_*", "R4C_*", "READINESS_INTERVAL_MS", "SESSION_PURGE_MS", "SMTP_URL",
+        "STUCK_ITEM_*", "SYNTHETIC_SUBJECTS", "TRUST_PROXY_HOPS", "WEB_DIST_DIR"
+      ]
     }
   }
 }
